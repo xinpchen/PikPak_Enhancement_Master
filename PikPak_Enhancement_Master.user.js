@@ -52,8 +52,8 @@
 // @run-at             document-start
 // @require            https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js
 // @require            https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js
-// @downloadURL        https://pem-stats.digbug82.workers.dev/pem/github.user.js
-// @updateURL          https://pem-stats.digbug82.workers.dev/pem/github.meta.js
+// @downloadURL        https://raw.githubusercontent.com/xinpchen/PikPak_Enhancement_Master/main/PikPak_Enhancement_Master.user.js
+// @updateURL          https://raw.githubusercontent.com/xinpchen/PikPak_Enhancement_Master/main/PikPak_Enhancement_Master.meta.js
 // ==/UserScript==
 
 /*
@@ -2806,7 +2806,7 @@ potplayerPromptCooldown: 10 * 60 * 1000,
 potplayerLikelyOpenTrustTTL: 24 * 60 * 60 * 1000,
 potplayerSuppressTodayTTL: 24 * 60 * 60 * 1000,
 potplayerPostRepairConfirmDelay: 6000,
-scriptUpdateManifestUrl: 'https://raw.githubusercontent.com/digbug82/PikPak_Enhancement_Master/main/version.json',
+scriptUpdateManifestUrl: 'https://raw.githubusercontent.com/xinpchen/PikPak_Enhancement_Master/main/version.json',
 scriptUpdateCheckTTL: 24 * 60 * 60 * 1000,
 scriptUpdateFailureTTL: 5 * 60 * 1000,
 scriptUpdateCacheKey: 'pk_script_update_cache',
