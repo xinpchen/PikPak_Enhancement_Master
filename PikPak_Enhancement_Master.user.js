@@ -44,6 +44,11 @@
 // @connect            whatslink.info
 // @connect            localhost
 // @connect            127.0.0.1
+// @connect            api-shoulei-ssl.xunlei.com
+// @connect            subtitle.v.geilijiasu.com
+// @connect            *.geilijiasu.com
+// @connect            subtitlecat.com
+// @connect            *.subtitlecat.com
 // @run-at             document-start
 // @require            https://cdn.jsdelivr.net/npm/hls.js@1.5.8/dist/hls.min.js
 // @require            https://cdn.jsdelivr.net/npm/localforage@1.10.0/dist/localforage.min.js
@@ -203,6 +208,7 @@ entries: [
 { key: 'pk_vol_muted', type: 'boolean', defaultValue: false, localLimit: {}, isPrefix: false, lru: false, ttl: false, cloudSync: 'default', mergeStrategy: 'localDefaultOnly' },
 { key: 'pk_default_video_quality', type: 'enum', defaultValue: 'original', localLimit: { allowed: ['default', 'original', '1080p', '720p', '480p'], maxLen: 32 }, isPrefix: false, lru: false, ttl: false, cloudSync: 'default', mergeStrategy: 'localDefaultOnly' },
 { key: 'pk_video_load_progress_cache', type: 'boolean', defaultValue: true, localLimit: {}, isPrefix: false, lru: false, ttl: false, cloudSync: 'default', mergeStrategy: 'localDefaultOnly' },
+{ key: 'pk_auto_online_sub', type: 'boolean', defaultValue: true, localLimit: {}, isPrefix: false, lru: false, ttl: false, cloudSync: 'default', mergeStrategy: 'localDefaultOnly' },
 { key: 'pk_visual_media_continuous_browse', type: 'boolean', defaultValue: false, localLimit: {}, isPrefix: false, lru: false, ttl: false, cloudSync: 'default', mergeStrategy: 'localDefaultOnly' },
 { key: 'pk_audio_play_mode', type: 'enum', defaultValue: 'order', localLimit: { allowed: ['order', 'loop', 'single', 'shuffle'], maxLen: 16 }, isPrefix: false, lru: false, ttl: false, cloudSync: 'default', mergeStrategy: 'localDefaultOnly' },
 { key: 'pk_audio_vol_level', type: 'number', defaultValue: 1, localLimit: { min: 0, max: 1 }, isPrefix: false, lru: false, ttl: false, cloudSync: 'default', mergeStrategy: 'localDefaultOnly' },
@@ -50670,6 +50676,13 @@ ${mkSvg(icons.playCenter)}
         <div class="pk-sub-btn" id="pk_sub_local_btn">${L.btn_sub_local}</div>
         <input type="file" id="pk_sub_file" accept=".srt,.vtt,.ass" style="display:none;">
     </div>
+    <div class="pk-sub-btn-group" style="margin-top:8px; align-items:center;">
+        <div class="pk-sub-btn" id="pk_sub_online_btn" title="从迅雷字幕库 / 字幕猫在线匹配中文字幕">在线匹配字幕</div>
+        <label style="display:flex;align-items:center;gap:4px;cursor:pointer;white-space:nowrap;font-size:11.5px;" title="播放视频时自动在线匹配中文字幕">
+            <input type="checkbox" id="pk_sub_auto_online" class="pk-sub-check" ${gmGet('pk_auto_online_sub', true) ? 'checked' : ''}>
+            <span>播放时自动</span>
+        </label>
+    </div>
 
     <div style="height:10px;"></div>
 
@@ -53545,8 +53558,13 @@ return vtt;
 };
 
 const autoMatchSubtitle = async (videoItem) => {
+if (await autoMatchCloudSubtitle(videoItem)) return;
+autoMatchOnlineSubtitle(videoItem);
+};
+
+const autoMatchCloudSubtitle = async (videoItem) => {
 const parentId = videoItem.parent_id;
-if (!parentId) return;
+if (!parentId) return false;
 
 const videoNameBase = videoItem.name.substring(0, videoItem.name.lastIndexOf('.'));
 
@@ -53558,15 +53576,15 @@ try {
 files = window.pkGlobalIndex
 ? await window.pkGlobalIndex.ensureFolder(parentId, { background: false, name: getKnownRealFolderName(parentId) })
 : await apiList(parentId, 100, null, null, false, true);
-} catch(e) { return; }
+} catch(e) { return false; }
 }
-if (!files || files.length === 0) return;
+if (!files || files.length === 0) return false;
 
 const subFiles = files.filter(f =>
 !f.trashed && f.kind !== 'drive#folder' &&
 /\.(srt|vtt|ass|ssa)$/i.test(f.name)
 );
-if (subFiles.length === 0) return;
+if (subFiles.length === 0) return false;
 
 let targetSub = subFiles.find(f => {
 const subBase = f.name.substring(0, f.name.lastIndexOf('.'));
@@ -53670,8 +53688,541 @@ updateSubStyle();
 } catch (e) {
 console.warn("[AutoSub] Load failed", e);
 }
+return true;
+}
+return false;
+};
+
+// ======================
+// 在线字幕：迅雷字幕库（优先）+ SubtitleCat 字幕猫（兜底）
+// 移植自「Missav & Jable 自动中文字幕」脚本。迅雷接口是模糊检索，
+// 因此只保留名称中严格包含番号的结果，避免挂上其它视频的字幕
+// ======================
+const ONLINE_SUB_SRT_RE = /\.(srt|ass|ssa)(\?|$)/i;
+const ONLINE_SUB_FILE_HOST_RE = /^https?:\/\/([a-z0-9-]+\.)*(geilijiasu\.com|subtitlecat\.com)(:\d+)?\//i;
+// 形如「标题-001」但并非番号的常见命名
+const JAV_CODE_STOP_WORDS = new Set(['CD','DVD','EP','TR','CH','IMG','PIC','DOC','VOL','CAM','DSC','DSCN','MVI','VID','EPISODE','EPISODES','PART','SCENE','TRACK','CHAPTER','CHAPTERS','DISC','DISK','VOLUME','SAMPLE','CLIP','VIDEO','LESSON','MODULE','LECTURE','TUTORIAL','COURSE','SEASON','SECTION','EXERCISE','VERSION','RELEASE','BUILD','IMAGE','IMAGES','PHOTO','PHOTOS','PICTURE','PICTURES','PAGE','SHEET','AUDIO','SONG','MUSIC','CAMERA','ANGLE','TRAILER','TEASER','BONUS','EXTRA','EXTRAS','DEMO','PREVIEW','RECAP','OPENING','ENDING','INTRO','OUTRO','JAN','FEB','MAR','APR','MAY','JUN','JUL','AUG','SEP','OCT','NOV','DEC']);
+const onlineSubSearchCache = new Map();
+let onlineSubAutoToken = 0;
+
+const pkOnlineSubFetch = (url, type = 'text', timeout = 15000) => new Promise((resolve, reject) => {
+if (typeof GM_xmlhttpRequest !== 'function') { reject(new Error('GM_xmlhttpRequest unavailable')); return; }
+GM_xmlhttpRequest({
+method: 'GET', url, responseType: type, timeout,
+onload: (res) => {
+if (res.status && (res.status < 200 || res.status >= 400)) { reject(new Error(`HTTP ${res.status}`)); return; }
+resolve(type === 'text' ? String(res.responseText || '') : res.response);
+},
+onerror: () => reject(new Error('Network Error')),
+ontimeout: () => reject(new Error('Timeout'))
+});
+});
+
+const extractVideoCode = (name) => {
+let s = String(name || '').normalize('NFKC');
+try { s = decodeURIComponent(s); } catch (e) {}
+s = s.replace(/\.[a-z0-9]{2,5}$/i, '').toUpperCase();
+
+// FC2：字幕库里一般只用数字命名，只能按数字宽松匹配
+const fc2 = s.match(/(^|[^A-Z0-9])FC2(?:[-_. ]?PPV)?[-_. ]?(\d{5,8})(?![0-9])/);
+if (fc2) return { fc2: true, prefix: '', number: fc2[2], numPrefix: '', query: `FC2-PPV-${fc2[2]}` };
+
+// 前者：SSIS-001 / 259LUXU-1234；后者（无分隔符或用 . 空格分隔）只认 001 这种补零三位数
+const forms = [
+/(^|[^A-Z0-9])(\d{0,3}[A-Z]{2,10})[-_](\d{3,7})(?![0-9PI])/g,
+/(^|[^A-Z0-9])(\d{0,3}[A-Z]{3,5})[-_. ]?(\d{2,5})(?![0-9PI])/g
+];
+for (let i = 0; i < forms.length; i++) {
+for (const m of s.matchAll(forms[i])) {
+const numPrefix = (m[2].match(/^\d{0,3}/) || [''])[0];
+const prefix = m[2].slice(numPrefix.length);
+const number = m[3];
+if (JAV_CODE_STOP_WORDS.has(prefix)) continue;
+if (!numPrefix && /^(19|20)\d{2}$/.test(number)) continue;
+if (i === 1 && !/^0\d{2}$/.test(number)) continue;
+return { fc2: false, prefix, number, numPrefix, query: `${m[2]}-${number}` };
+}
+}
+return null;
+};
+
+const hasBuiltInChineseSub = (name) => {
+let s = String(name || '');
+try { s = decodeURIComponent(s); } catch (e) {}
+s = s.toUpperCase().replace(/\.[A-Z0-9]{2,5}$/, '');
+if (/(^|[^A-Z0-9])C(?=$|[^A-Z0-9])|\dC(?=$|[^A-Z0-9])/.test(s)) return true;
+return /中文字幕|中字|CHINESE[\s_-]*SUB(TITLE)?S?/.test(s.replace(/无中文字幕|无中字|无字幕|无中文/g, ''));
+};
+
+const normalizeOnlineSubHaystack = (value) => {
+let text = String(value || '').replace(/\+/g, ' ');
+try { text = decodeURIComponent(text); } catch (e) {}
+return text.toUpperCase();
+};
+const escapeOnlineSubRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const haystackHasCode = (value, codeInfo, loose = false) => {
+const haystack = normalizeOnlineSubHaystack(value);
+const number = escapeOnlineSubRegExp(codeInfo.number);
+if (codeInfo.fc2) {
+if (loose) return new RegExp(`(^|[^0-9])${number}(?![0-9])`).test(haystack);
+return new RegExp(`(^|[^A-Z0-9])FC2[-_. ]?(PPV[-_. ]?)?${number}(?![0-9])`).test(haystack);
+}
+const prefix = escapeOnlineSubRegExp(codeInfo.prefix);
+return new RegExp(`(^|[^A-Z0-9])${codeInfo.numPrefix ? '\\d{0,3}' : ''}${prefix}[-_. ]?${number}(?![0-9])`).test(haystack);
+};
+
+const getOnlineSubLangScore = (languages) => {
+const tags = (Array.isArray(languages) ? languages : []).map(l => String(l || '').trim().toLowerCase()).filter(Boolean);
+if (!tags.length) return 1;
+const all = tags.join('/');
+if (/简体|簡體|简中|簡中|chs|zh[-_ ]?cn|zh[-_ ]?hans/.test(all)) return 5;
+if (/双语|雙語|中英|中日|中韩|bilingual/.test(all)) return 4;
+if (/繁体|繁體|繁中|cht|zh[-_ ]?tw|zh[-_ ]?hk/.test(all)) return 3;
+if (/中文|中字|zh|chinese/.test(all)) return 2;
+if (/默认|默認|其他|未知|unknown|default/.test(all)) return 1;
+return 0;
+};
+
+// 迅雷按分词检索，同一个番号换几种写法会返回互补的结果集，因此并行查询后合并
+const searchXunleiOnlineSubs = async (codeInfo, keyword) => {
+const base = codeInfo ? codeInfo.query : String(keyword || '').trim();
+if (!base) return [];
+const queries = codeInfo
+? [...new Set([base, `${base} zh`, `${base} uncensored`, `${base} c`])]
+: [base];
+const lists = await Promise.all(queries.map(async (q) => {
+try {
+const data = JSON.parse(await pkOnlineSubFetch(`https://api-shoulei-ssl.xunlei.com/oracle/subtitle?name=${encodeURIComponent(q)}`));
+return Array.isArray(data && data.data) ? data.data : [];
+} catch (e) { return []; }
+}));
+const seen = new Set();
+const out = [];
+lists.forEach(list => list.forEach(entry => {
+if (!entry || typeof entry.url !== 'string') return;
+if (!ONLINE_SUB_FILE_HOST_RE.test(entry.url) || !ONLINE_SUB_SRT_RE.test(entry.url)) return;
+let loose = false;
+if (codeInfo) {
+const nameInfo = `${entry.name || ''} ${entry.extra_name || ''}`;
+if (!haystackHasCode(nameInfo, codeInfo)) {
+if (!codeInfo.fc2 || !haystackHasCode(nameInfo, codeInfo, true)) return;
+loose = true;
+}
+}
+if (seen.has(entry.url)) return;
+seen.add(entry.url);
+out.push({
+source: 'xunlei',
+name: entry.name || base,
+url: entry.url,
+ext: String(entry.ext || '').toLowerCase() || 'srt',
+languages: Array.isArray(entry.languages) ? entry.languages : [],
+durationSec: Number(entry.duration) > 0 ? Number(entry.duration) / 1000 : 0,
+loose
+});
+}));
+return out;
+};
+
+const getSubtitleCatLangHint = (text) => {
+const t = String(text || '').toLowerCase();
+if (/zh[-_.]?tw|cht|繁/.test(t)) return 2;
+if (/zh[-_.]?cn|chs|简/.test(t)) return 3;
+if (/(^|[-_.])zh([-_.]|$)|chinese|中文|中字/.test(t)) return 3;
+return 1;
+};
+
+const searchSubtitleCatOnlineSubs = async (codeInfo, keyword) => {
+const q = codeInfo ? codeInfo.query : String(keyword || '').trim();
+if (!q) return [];
+let html = '';
+try { html = await pkOnlineSubFetch(`https://www.subtitlecat.com/index.php?search=${encodeURIComponent(q)}`); } catch (e) { return []; }
+const doc = new DOMParser().parseFromString(html, 'text/html');
+const out = [];
+Array.from(doc.querySelectorAll('table tbody tr')).forEach(tr => {
+const a = tr.querySelector('td a');
+const href = a ? (a.getAttribute('href') || '') : '';
+if (!href) return;
+let detailUrl = '';
+try { detailUrl = new URL(href, 'https://www.subtitlecat.com/').href; } catch (e) { return; }
+if (!ONLINE_SUB_FILE_HOST_RE.test(detailUrl)) return;
+const title = a.textContent.replace(/\s*\(translated from[^)]*\)/i, '').trim() || href;
+if (codeInfo && !haystackHasCode(`${title} ${href}`, codeInfo)) return;
+const metrics = Array.from(tr.querySelectorAll('.sub-table__metric-value')).map(el => el.textContent.replace(/\s+/g, ' ').trim()).filter(Boolean);
+out.push({
+source: 'cat',
+name: title,
+detailUrl,
+metrics,
+languages: [],
+durationSec: 0,
+loose: false,
+langHint: getSubtitleCatLangHint(`${title} ${href}`)
+});
+});
+return out;
+};
+
+// 详情页是同一部片的多语种列表，优先取中文
+const resolveSubtitleCatOnlineSubUrl = async (detailUrl) => {
+const html = await pkOnlineSubFetch(detailUrl);
+const doc = new DOMParser().parseFromString(html, 'text/html');
+const links = Array.from(doc.querySelectorAll('a[href]'))
+.map(a => ({ href: a.getAttribute('href') || '', text: a.textContent.trim() }))
+.filter(i => ONLINE_SUB_SRT_RE.test(i.href));
+const pick = (lang, re) => {
+const hit = links.find(i => re.test(`${i.href} ${i.text}`));
+return hit ? { url: new URL(hit.href, detailUrl).href, lang } : null;
+};
+return pick('简体', /zh[-_]cn|zh[-_]hans|chs|simplified|简体|簡體/i)
+|| pick('繁体', /zh[-_]tw|zh[-_]hk|cht|traditional|繁体|繁體/i)
+|| pick('中文', /(^|[-_.\s])zh([-_.\s]|$)|chinese|中文|中字/i)
+|| null;
+};
+
+const decodeOnlineSubBuffer = (buffer) => {
+const bytes = buffer instanceof ArrayBuffer ? new Uint8Array(buffer) : null;
+if (!bytes || !bytes.length) return '';
+// 带 BOM 的 UTF-16LE
+if (bytes[0] === 0xFF && bytes[1] === 0xFE) return new TextDecoder('utf-16le').decode(bytes);
+// 迅雷的字幕多为 GBK，必须自己探测编码
+const body = (bytes[0] === 0xEF && bytes[1] === 0xBB && bytes[2] === 0xBF) ? bytes.slice(3) : bytes;
+let text = '';
+try { text = new TextDecoder('utf-8', { fatal: true }).decode(body); } catch (e) {}
+if (text.includes('\u0000')) {
+try { text = new TextDecoder('utf-16le', { fatal: true }).decode(body); } catch (e) {}
+}
+if (text && !text.includes('\u0000')) return text;
+for (const enc of ['gbk', 'big5']) {
+try { return new TextDecoder(enc, { fatal: true }).decode(body); } catch (e) {}
+}
+return new TextDecoder('utf-8').decode(body);
+};
+
+const fetchOnlineSubText = async (url, ext = 'srt') => {
+if (!ONLINE_SUB_FILE_HOST_RE.test(url)) return '';
+let buffer;
+try { buffer = await pkOnlineSubFetch(url, 'arraybuffer', 20000); } catch (e) { return ''; }
+const text = decodeOnlineSubBuffer(buffer);
+// ASS/SSA 没有时间轴箭头，以 Dialogue 行为准
+const valid = (ext === 'ass' || ext === 'ssa') ? /^\s*Dialogue\s*:/im.test(text) : text.includes('-->');
+return valid ? text : '';
+};
+
+const getOnlineSubVideoDuration = (videoItem) => {
+const live = v ? Number(v.duration) : NaN;
+if (Number.isFinite(live) && live > 0) return live;
+const pId = getPhysicalId(videoItem);
+const cached = (videoItem.params && videoItem.params.duration) || S.durationMap.get(pId) || gmGet('pk_duration_' + pId, 0);
+return Number(cached) > 0 ? Number(cached) : 0;
+};
+
+const waitOnlineSubVideoDuration = (ms) => new Promise((resolve) => {
+const live = Number(v.duration);
+if (Number.isFinite(live) && live > 0) { resolve(); return; }
+const finish = () => {
+clearTimeout(timer);
+v.removeEventListener('loadedmetadata', finish);
+v.removeEventListener('durationchange', finish);
+resolve();
+};
+const timer = setTimeout(finish, ms);
+v.addEventListener('loadedmetadata', finish);
+v.addEventListener('durationchange', finish);
+});
+
+// 时长接近优先（不同步比简繁更影响观看），其次简体 > 双语 > 繁体 > 未知语种
+const rankOnlineSubs = (list, videoDur) => {
+const keyed = list.map(c => {
+const diff = (videoDur > 0 && c.durationSec > 0) ? Math.abs(c.durationSec - videoDur) / videoDur : -1;
+return { c, sync: diff < 0 ? 1 : (diff <= 0.03 ? 0 : 2), lang: getOnlineSubLangScore(c.languages), diff, srt: c.ext === 'srt' ? 0 : 1 };
+});
+keyed.sort((a, b) => a.sync - b.sync || b.lang - a.lang || a.diff - b.diff || a.srt - b.srt);
+return keyed.map(x => x.c);
+};
+
+// FC2 只按数字匹配到的话，必须有时长佐证才敢自动加载
+const isOnlineSubTrusted = (c, videoDur) => {
+if (!c.loose) return true;
+return videoDur > 0 && c.durationSec > 0 && Math.abs(c.durationSec - videoDur) / videoDur <= 0.05;
+};
+
+const mountSubtitleText = (text, displayName, ext = 'srt') => {
+const vttText = (ext === 'ass' || ext === 'ssa') ? convertAssToVtt(text) : convertSrtToVtt(text);
+const vttLines = vttText.split('\n');
+const timeReg = /(\d{2}):(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})[.,](\d{3})/;
+const cues = [];
+let cueStart = null, cueEnd = null, cueText = [];
+
+const flush = () => {
+if (cueStart !== null && cueText.length > 0 && cueEnd > cueStart) cues.push([cueStart, cueEnd, cueText.join('\n')]);
+cueText = [];
+};
+
+vttLines.forEach(line => {
+const match = line.match(timeReg);
+if (match) {
+flush();
+cueStart = parseInt(match[1])*3600 + parseInt(match[2])*60 + parseInt(match[3]) + parseInt(match[4])/1000;
+cueEnd = parseInt(match[5])*3600 + parseInt(match[6])*60 + parseInt(match[7]) + parseInt(match[8])/1000;
+} else {
+// 远程字幕带 <font> 之类的标签，去掉标签后为空的行一并丢弃
+const clean = line.trim().replace(/<[^>]+>/g, '').trim();
+if (clean && cueStart !== null && !clean.startsWith('WEBVTT') && !/^\d+$/.test(clean)) cueText.push(clean);
+}
+});
+flush();
+
+if (cues.length === 0) return 0;
+
+const targetTrack = createFreshSubtitleTrack();
+cues.forEach(([start, end, cueTextValue]) => {
+try { targetTrack.addCue(new VTTCue(start, end, cueTextValue)); } catch(e){}
+});
+if (!targetTrack.cues || targetTrack.cues.length === 0) {
+try { targetTrack.mode = 'disabled'; } catch(e){}
+return 0;
+}
+
+targetTrack.oncuechange = () => {
+const active = targetTrack.activeCues;
+const txtEl = d.querySelector('#pk_sub_text');
+if (active && active.length > 0 && txtEl) {
+txtEl.textContent = active[active.length - 1].text;
+txtEl.style.display = 'block';
+} else if (txtEl) {
+txtEl.style.display = 'none';
 }
 };
+subState.hasSub = true;
+subState.track = targetTrack;
+subState.track.mode = 'hidden';
+subState.offset = 0;
+updateSubStyle();
+
+const toggle = d.querySelector('#pk_sub_toggle');
+if (toggle) toggle.checked = true;
+const nameLabel = d.querySelector('#pk_sub_name');
+if (nameLabel) nameLabel.textContent = displayName;
+const timeVal = d.querySelector('#pk_sub_time_val');
+if (timeVal) timeVal.textContent = `0.0 ${L.unit_sec}`;
+updateSubStyle();
+return targetTrack.cues.length;
+};
+
+const loadOnlineSubCandidate = async (cand) => {
+if (cand.source === 'cat') {
+const picked = await resolveSubtitleCatOnlineSubUrl(cand.detailUrl);
+if (!picked) return null;
+const extMatch = picked.url.match(/\.(\w+)(\?|$)/);
+const ext = extMatch ? extMatch[1].toLowerCase() : 'srt';
+const text = await fetchOnlineSubText(picked.url, ext);
+if (!text) return null;
+let fileName = '';
+try { fileName = decodeURIComponent(picked.url.split('/').pop()); } catch (e) {}
+return { text, ext, name: fileName || `${cand.name} [${picked.lang}].srt` };
+}
+const text = await fetchOnlineSubText(cand.url, cand.ext);
+return text ? { text, ext: cand.ext, name: cand.name } : null;
+};
+
+const showPlayerNotice = (text, ms = 3000) => {
+const target = d.querySelector('#pk_p_box');
+if (!target) return;
+const toast = document.createElement('div');
+toast.className = 'pk-player-notice';
+toast.style.cssText = "position:absolute;top:80px;right:20px;background:rgba(0,0,0,0.6);color:#fff;padding:6px 12px;border-radius:4px;font-size:12px;pointer-events:none;animation:pkFadeIn 0.5s;z-index:90;";
+toast.textContent = text;
+target.appendChild(toast);
+setTimeout(() => { if (toast.parentNode) toast.remove(); }, ms);
+};
+
+const autoMatchOnlineSubtitle = async (videoItem) => {
+if (!videoItem || isPlayerDestroyed || item !== videoItem || !gmGet('pk_auto_online_sub', true)) return;
+const codeInfo = extractVideoCode(videoItem.name);
+// 文件名自带「中文字幕 / -C」标记的，视频里已经压了字幕
+if (!codeInfo || hasBuiltInChineseSub(videoItem.name)) return;
+const myToken = ++onlineSubAutoToken;
+const isStale = () => myToken !== onlineSubAutoToken || isPlayerDestroyed || item !== videoItem || subState.hasSub;
+try {
+let candidates = await searchXunleiOnlineSubs(codeInfo);
+if (isStale()) return;
+let videoDur = 0;
+if (candidates.length > 0) {
+// 已有缓存时长（如重播）就不必等元数据
+if (getOnlineSubVideoDuration(videoItem) <= 0) await waitOnlineSubVideoDuration(1500);
+if (isStale()) return;
+videoDur = getOnlineSubVideoDuration(videoItem);
+candidates = rankOnlineSubs(candidates.filter(c => isOnlineSubTrusted(c, videoDur) && getOnlineSubLangScore(c.languages) > 0), videoDur);
+} else {
+candidates = (await searchSubtitleCatOnlineSubs(codeInfo)).sort((a, b) => b.langHint - a.langHint);
+}
+if (isStale()) return;
+for (const cand of candidates.slice(0, 2)) {
+const loaded = await loadOnlineSubCandidate(cand);
+if (isStale()) return;
+if (!loaded || mountSubtitleText(loaded.text, loaded.name, loaded.ext) <= 0) continue;
+showPlayerNotice(`已自动加载在线字幕：${loaded.name}`);
+return;
+}
+} catch (e) {
+console.warn('[OnlineSub] Auto match failed', e);
+}
+};
+
+const collapseSubtitlePanel = () => {
+const subPanel = d.querySelector('#pk_sub_panel');
+const subTrigger = d.querySelector('#pk_sub_trigger');
+if (!subPanel || !subTrigger) return;
+mobileSubtitlePanelOpen = false;
+subTrigger.setAttribute('aria-expanded', 'false');
+subPanel.style.setProperty('display', 'none', 'important');
+subTrigger.addEventListener('mouseleave', () => {
+if (!isTouchOnlyMobileManagerEnvironment()) subPanel.style.removeProperty('display');
+}, { once: true });
+};
+
+const openOnlineSubtitleModal = () => {
+collapseSubtitlePanel();
+const modal = document.createElement('div');
+modal.className = 'pk-sub-search-modal';
+modal.style.cssText = `
+position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+background: rgba(20,20,20,0.95); border: 1px solid #444; border-radius: 8px;
+width: 380px; height: 450px; display: flex; flex-direction: column;
+box-shadow: 0 10px 40px rgba(0,0,0,0.8); z-index: 60; padding: 15px; backdrop-filter: blur(10px);
+`;
+box.appendChild(modal);
+modal.onclick = (evt) => evt.stopPropagation();
+
+const targetItem = item;
+const initialCode = extractVideoCode(targetItem.name);
+const keyword = initialCode ? initialCode.query : cleanFilename(targetItem.name);
+modal.innerHTML = `
+<div style="margin-bottom:10px; padding-bottom:10px; border-bottom:1px solid #333; display:flex; gap:8px;">
+<input id="pk_sub_online_input" value="${esc(keyword)}" placeholder="输入番号或片名，回车搜索" style="flex:1; min-width:0; box-sizing:border-box; background:#181818; border:1px solid #444; color:#fff; padding:8px 12px; border-radius:4px; outline:none; font-size:13px;">
+<div class="pk-sub-btn" id="pk_sub_online_go" style="flex:0 0 auto; padding:6px 14px;">搜索</div>
+</div>
+<div id="pk_sub_online_list" class="pk-scroll" style="flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:8px;"></div>
+<button id="pk_sub_online_close" style="margin-top:10px; background:#333; color:#fff; border:none; padding:8px; border-radius:4px; cursor:pointer; font-size:13px;">${L.btn_close}</button>
+`;
+
+const list = modal.querySelector('#pk_sub_online_list');
+const input = modal.querySelector('#pk_sub_online_input');
+let searchToken = 0;
+let loadingRow = null;
+
+const showListStatus = (text) => {
+list.innerHTML = '';
+const tip = document.createElement('div');
+tip.className = 'pk-online-sub-tip';
+tip.style.cssText = 'color:#888;text-align:center;font-size:12px;padding:20px;';
+tip.textContent = text;
+list.appendChild(tip);
+};
+
+const appendRow = (cand) => {
+if (list.querySelector('.pk-online-sub-tip')) list.innerHTML = '';
+const row = document.createElement('div');
+row.style.cssText = 'padding:8px 10px;background:#2a2a2a;border:1px solid #3d3d3d;border-radius:6px;cursor:pointer;text-align:left;font-size:12px;line-height:1.4;transition:all 0.2s;';
+row.onmouseover = () => { row.style.background = '#3d3d3d'; row.style.borderColor = 'var(--pk-pri)'; };
+row.onmouseout = () => { row.style.background = '#2a2a2a'; row.style.borderColor = '#3d3d3d'; };
+
+const langs = (cand.languages || []).map(l => String(l || '').trim()).filter(l => l && !/^(其他|默认|默認|未知语言)$/i.test(l));
+const meta = [];
+if (cand.durationSec > 0) meta.push(`时长 ${fmtPlayerT(cand.durationSec)}`);
+if (cand.loose) meta.push('仅数字匹配，请核对时长');
+if (cand.metrics && cand.metrics.length > 0) meta.push(...cand.metrics);
+
+const top = document.createElement('div');
+top.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:8px;';
+const name = document.createElement('span');
+name.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+name.textContent = cand.name;
+name.title = cand.name;
+const tag = document.createElement('span');
+tag.style.cssText = 'color:#888;white-space:nowrap;flex-shrink:0;font-size:11px;';
+tag.textContent = [cand.source === 'cat' ? '字幕猫' : '迅雷', ...langs].join(' · ');
+top.appendChild(name);
+top.appendChild(tag);
+const detail = document.createElement('div');
+detail.style.cssText = 'color:#777;font-size:11px;';
+detail.textContent = meta.join(' · ');
+row.appendChild(top);
+if (detail.textContent) row.appendChild(detail);
+
+row.onclick = async (e) => {
+e.stopPropagation();
+if (loadingRow) return;
+loadingRow = row;
+row.style.opacity = '0.6';
+detail.textContent = '正在加载...';
+row.appendChild(detail);
+try {
+const loaded = await loadOnlineSubCandidate(cand);
+if (isPlayerDestroyed || item !== targetItem) return;
+if (!loaded || mountSubtitleText(loaded.text, loaded.name, loaded.ext) <= 0) throw new Error('empty subtitle');
+showPlayerNotice(`已加载在线字幕：${loaded.name}`);
+modal.remove();
+} catch (err) {
+console.warn('[OnlineSub] Load failed', err);
+detail.textContent = '❌ 加载失败，请试试其它版本';
+} finally {
+loadingRow = null;
+row.style.opacity = '1';
+}
+};
+list.appendChild(row);
+};
+
+const doSearch = async () => {
+const query = input.value.trim();
+if (!query) return;
+const myToken = ++searchToken;
+const searchCode = extractVideoCode(query);
+const cacheKey = searchCode ? `code:${searchCode.query}` : `text:${query}`;
+showListStatus('正在搜索迅雷字幕库...');
+
+let xunlei = onlineSubSearchCache.get(cacheKey);
+if (!xunlei) {
+xunlei = searchXunleiOnlineSubs(searchCode, query);
+onlineSubSearchCache.set(cacheKey, xunlei);
+}
+let results = [];
+try { results = await xunlei; } catch (e) {}
+// 空结果不缓存，网络瞬断后重试才能重新请求
+if (results.length === 0) onlineSubSearchCache.delete(cacheKey);
+if (myToken !== searchToken) return;
+results = rankOnlineSubs(results, getOnlineSubVideoDuration(targetItem)).slice(0, 30);
+if (results.length === 0) showListStatus('迅雷字幕库没有结果，正在查询字幕猫...');
+results.forEach(appendRow);
+
+let cat = [];
+try { cat = await searchSubtitleCatOnlineSubs(searchCode, query); } catch (e) {}
+if (myToken !== searchToken) return;
+cat = searchCode ? cat.sort((a, b) => b.langHint - a.langHint) : cat.slice(0, 15);
+if (results.length === 0 && cat.length === 0) {
+showListStatus(searchCode ? '没有找到该番号的字幕' : '没有找到匹配的字幕');
+return;
+}
+cat.forEach(appendRow);
+};
+
+modal.querySelector('#pk_sub_online_go').onclick = (e) => { e.stopPropagation(); doSearch(); };
+modal.querySelector('#pk_sub_online_close').onclick = () => modal.remove();
+input.onkeydown = (ev) => {
+ev.stopPropagation();
+if (ev.key === 'Enter') { ev.preventDefault(); doSearch(); }
+};
+bindPlainTextMaxLengthLimits(modal, [['#pk_sub_online_input', CONF.subtitleSearchInputMaxLen, true]]);
+doSearch();
+};
+
+const btnOnlineSub = d.querySelector('#pk_sub_online_btn');
+if (btnOnlineSub) btnOnlineSub.onclick = (e) => { e.stopPropagation(); openOnlineSubtitleModal(); };
+
+const autoOnlineSubCheck = d.querySelector('#pk_sub_auto_online');
+if (autoOnlineSubCheck) autoOnlineSubCheck.onchange = () => gmSet('pk_auto_online_sub', autoOnlineSubCheck.checked);
 
 const btnCloudSub = d.querySelector('#pk_sub_cloud_btn');
 
